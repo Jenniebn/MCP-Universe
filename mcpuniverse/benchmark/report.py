@@ -2,6 +2,9 @@
 The class for a generate a report
 """
 # pylint: disable=broad-exception-caught
+import json
+from collections import defaultdict, Counter  
+
 import uuid
 from datetime import datetime
 from typing import List, Dict
@@ -26,6 +29,11 @@ class BenchmarkReport:
         self.trace_collector = trace_collector
         self.log_dir = log_dir
         self.log_name = log_name
+
+        self._context = runner._context
+        self._default_folder = getattr(runner, "_default_folder", "")
+
+        self.llm_configs = [x for x in self.benchmark_agent_configs if x['kind'] == 'llm']
 
         self.llm_configs = [x for x in self.benchmark_agent_configs if x['kind'] == 'llm']
         assert len(self.llm_configs) == 1, "the number of llm configs should be 1"
@@ -319,3 +327,173 @@ class BenchmarkReport:
                 f.write(report_str)
         except Exception as e:
             print(f"Write report error: {e}")
+
+    def _is_tool_success(self, task_trace):
+        """Determine whether a tool span succeeded."""
+        if not task_trace.records:
+            return False
+        first_record = task_trace.records[0]
+        data = first_record.data
+
+        error = data.get("error", "") or ""
+        response = data.get("response", None)
+
+        is_error_flag = False
+        if isinstance(response, dict):
+            # matches your example: "isError": true
+            is_error_flag = bool(response.get("isError", False))
+
+        return (error == "") and (not is_error_flag)
+
+    def _get_task_question(self, task_name: str) -> str:
+        """Try to load the Task YAML and return its question text."""
+        # Lazy import to avoid cycles
+        try:
+            from mcpuniverse.benchmark.task import Task
+        except Exception:
+            return task_name
+
+        task_path = Path(task_name)
+        if not task_path.exists() and self._default_folder:
+            task_path = Path(self._default_folder) / task_name
+
+        try:
+            task = Task(str(task_path), context=self._context)
+            return task.get_question()
+        except Exception:
+            return task_name
+
+    def export_metrics_stats_rollouts(self, prefix: str = ""):
+        """
+        Export:
+          - metrics_YYYYMMDD_HHMMSS.json
+          - stats_YYYYMMDD_HHMMSS.json
+          - rollouts_YYYYMMDD_HHMMSS.json
+        into REPORT_FOLDER (log/), aggregating across all benchmarks.
+
+        Each task key may look like "path/to/task.json::run3"; we group by the
+        base task name before "::run".
+        """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        metrics_file = REPORT_FOLDER / f"{prefix}_metrics_{timestamp}.json"
+        stats_file = REPORT_FOLDER / f"{prefix}_stats_{timestamp}.json"
+        rollouts_file = REPORT_FOLDER / f"{prefix}_rollouts_{timestamp}.json"
+
+        REPORT_FOLDER.mkdir(parents=True, exist_ok=True)
+
+        metrics = []          # list of {tool_name, execution_time, success, timestamp, ...}
+        rollouts_by_qid = {}  # qid -> {qid, q, rollouts: [...]}
+
+        for benchmark_result, benchmark_config in zip(self.benchmark_results, self.benchmark_configs):
+            for task_name, task_result in benchmark_result.task_results.items():
+                # task_name may be "task.json::run3"
+                base_task = task_name.split("::run", 1)[0]
+
+                trace_id = benchmark_result.task_trace_ids.get(task_name)
+                if not trace_id:
+                    continue
+
+                # All spans for this rollout
+                task_traces = list(self.trace_collector.get(trace_id))
+
+                # Tool spans for this rollout
+                tool_traces = [
+                    t for t in task_traces
+                    if t.records and t.records[0].data.get("type") == "tool"
+                ]
+                tool_calls_for_rollout = len(tool_traces)
+
+                # Per-tool metrics
+                for t in tool_traces:
+                    first_record = t.records[0]
+                    data = first_record.data
+
+                    tool_name = data.get("tool_name") or data.get("tool")
+                    success = self._is_tool_success(t)
+
+                    metrics.append({
+                        "tool_name": tool_name,
+                        "execution_time": t.running_time,          # seconds
+                        "success": success,
+                        "timestamp": first_record.timestamp,       # DataRecord timestamp
+                        "server": data.get("server", None),
+                        "trace_id": t.trace_id,
+                        "task_name": task_name,
+                    })
+
+                # Rollout-level success from evaluation results
+                eval_results = task_result["evaluation_results"]
+                rollout_success = True
+                for er in eval_results:
+                    passed = getattr(er, "passed", None)
+                    if passed is None and isinstance(er, dict):
+                        passed = er.get("passed", False)
+                    if not passed:
+                        rollout_success = False
+                        break
+
+                # Steps for this rollout: use existing analyzer
+                stats, parent_ids, llm_call_count, total_turns = self._analyze_traces(trace_id)
+                steps_for_rollout = total_turns or llm_call_count or tool_calls_for_rollout
+
+                # Group by base task
+                qid = Path(base_task).stem
+                q_text = self._get_task_question(base_task)
+
+                entry = rollouts_by_qid.setdefault(qid, {
+                    "qid": qid,
+                    "q": q_text,
+                    "rollouts": []
+                })
+                entry["rollouts"].append({
+                    "success": rollout_success,
+                    "tool_calls": tool_calls_for_rollout,
+                    "steps": steps_for_rollout,
+                })
+
+        # Aggregate stats over all tool metrics
+        if metrics:
+            total_calls = len(metrics)
+            success_count = sum(1 for m in metrics if m.get("success"))
+            success_rate = success_count / total_calls if total_calls else 0.0
+
+            times = [m["execution_time"] for m in metrics]
+            avg_time = sum(times) / total_calls if total_calls else 0.0
+            min_time = min(times) if times else 0.0
+            max_time = max(times) if times else 0.0
+
+            tool_counts = Counter(m["tool_name"] for m in metrics)
+            most_used = [[name, count] for name, count in tool_counts.most_common()]
+
+            stats = {
+                "total_calls": total_calls,
+                "success_rate": success_rate,
+                "avg_time": avg_time,
+                "min_time": min_time,
+                "max_time": max_time,
+                "unique_tools": len(tool_counts),
+                "most_used": most_used,
+            }
+        else:
+            stats = {
+                "total_calls": 0,
+                "success_rate": 0.0,
+                "avg_time": 0.0,
+                "min_time": 0.0,
+                "max_time": 0.0,
+                "unique_tools": 0,
+                "most_used": [],
+            }
+
+        rollouts = list(rollouts_by_qid.values())
+
+        metrics_file.write_text(json.dumps(metrics, indent=2))
+        stats_file.write_text(json.dumps(stats, indent=2))
+        rollouts_file.write_text(json.dumps(rollouts, indent=2))
+
+        print(f"[BenchmarkReport] Saved metrics to {metrics_file}")
+        print(f"[BenchmarkReport] Saved stats to {stats_file}")
+        print(f"[BenchmarkReport] Saved rollouts to {rollouts_file}")
+
+        return metrics_file, stats_file, rollouts_file
