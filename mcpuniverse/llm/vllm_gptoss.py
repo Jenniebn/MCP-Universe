@@ -15,9 +15,18 @@ import requests
 
 from mcpuniverse.common.config import BaseConfig
 from mcpuniverse.common.context import Context
+from mcpuniverse.agent.schemas import ReActStep, ActionModel
 from .base import BaseLLM
 
 load_dotenv()
+
+REACT_STEP_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "ReActStep",
+        "schema": ReActStep.model_json_schema(),
+    },
+}
 
 @dataclass
 class VLLMLocalConfig(BaseConfig):
@@ -32,7 +41,7 @@ class VLLMLocalConfig(BaseConfig):
         top_p (float): Controls diversity of output (default: 1.0).
         frequency_penalty (float): Penalizes frequent token use (default: 0.0).
         presence_penalty (float): Penalizes repeated topics (default: 0.0).
-        max_completion_tokens (int): Maximum number of tokens in the completion (default: 2048).
+        max_tokens (int): Maximum number of tokens in the completion (default: 2048).
         seed (int): Random seed for reproducibility (default: 12345).
         reasoning (str): Reasoning level (default: "high").
     """
@@ -42,10 +51,14 @@ class VLLMLocalConfig(BaseConfig):
     temperature: float = 1.0
     top_p: float = 1.0
     frequency_penalty: float = 0.0
-    presence_penalty: float = 0.0
-    max_completion_tokens: int = 20000
+    presence_penalty: float = 1.05  
+    max_tokens: int = 20000
     seed: int = 12345
     reasoning: str = "high"
+    repetition_penalty: float = 0.0
+    enable_thinking: bool = False
+    topk: float = 20
+    minp: float = 0
 
 
 class VLLMLocalModel(BaseLLM):
@@ -95,33 +108,41 @@ class VLLMLocalModel(BaseLLM):
         """
         max_retries = kwargs.get("max_retries", 5)
         base_delay = kwargs.get("base_delay", 10.0)
-        unused_response_format = response_format
+        schema = response_format.model_json_schema()
 
         for attempt in range(max_retries + 1):
             try:
-                response = requests.post(
-                    f"{self.config.base_url}/v1/completions",
-                    json={
-                        "model": self.config.model_name,
-                        "prompt": messages[0]['content'],
-                        "temperature": self.config.temperature,
-                        "max_tokens": self.config.max_completion_tokens,
-                        "top_p": self.config.top_p,
-                        "frequency_penalty": self.config.frequency_penalty,
-                        "presence_penalty": self.config.presence_penalty,
-                        "seed": self.config.seed,
-                        "use_beam_search": False,
-                        "skip_special_tokens": False,
-                    },
+                payload = {
+                    "model": self.config.model_name,
+                    "messages": messages,
+                    "temperature": self.config.temperature,
+                    "max_tokens": self.config.max_tokens,
+                    "top_p": self.config.top_p,
+                    "seed": self.config.seed,
+                    "presence_penalty": self.config.presence_penalty,
+                    "frequency_penalty": self.config.frequency_penalty,
+                    "response_format": REACT_STEP_RESPONSE_FORMAT
+                }
+
+                res = requests.post(
+                    f"{self.config.base_url}/v1/chat/completions",
+                    json=payload,
                     headers={
                         "Authorization": f"Bearer {self.config.api_key}",
                         "Content-Type": "application/json"
                     },
                     timeout=int(kwargs.get("timeout", 60))
                 )
-                response.raise_for_status()
-                response = response.json()["choices"][0]["text"]
-                return response
+                res.raise_for_status()
+
+                content = res.json()["choices"][0]["message"]["content"]
+                if response_format is None:
+                    return content
+                try:
+                    return ReActStep.model_validate_json(content)
+                except Exception as e:
+                    self._logger.error(f"Failed to parse structured output:\n{content}")
+                    return None
 
             except (RateLimitError, APIError, APITimeoutError) as e:
                 if attempt == max_retries:

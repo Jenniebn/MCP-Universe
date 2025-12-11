@@ -6,6 +6,7 @@ This module contains the ReAct agent class and its configuration, based on the p
 """
 # pylint: disable=broad-exception-caught
 import os
+import re
 import json
 from typing import Optional, Union, Dict, List
 from collections import OrderedDict
@@ -25,6 +26,7 @@ from mcpuniverse.callbacks.base import (
 from .base import BaseAgentConfig, BaseAgent
 from .utils import build_system_prompt
 from .types import AgentResponse
+from .schemas import ReActStep
 
 DEFAULT_CONFIG_FOLDER = os.path.join(os.path.dirname(os.path.realpath(__file__)), "configs")
 
@@ -144,23 +146,33 @@ class ReAct(BaseAgent):
 
         for iter_num in range(self._config.max_iterations):
             prompt = self._build_prompt(message)
-            response = await self._llm.generate_async(
+            response_text = await self._llm.generate_async(
                 messages=[{"role": "user", "content": prompt}],
+                response_format=ReActStep,
                 tracer=tracer,
                 callbacks=callbacks
             )
             try:
-                response = response.strip().strip('`').strip()
-                if response.startswith("json"):
-                    response = response[4:].strip()
-                parsed_response = json.loads(response)
+                # Handle both Pydantic model instances and string responses
+                if hasattr(response_text, 'model_dump'):
+                    # It's a Pydantic model (ReActStep instance)
+                    parsed_response = response_text.model_dump()
+                elif isinstance(response_text, str):
+                    # It's a string, parse as JSON
+                    response_text = response_text.strip().strip('`').strip()
+                    if response_text.startswith("json"):
+                        response_text = response_text[4:].strip()
+                    parsed_response = json.loads(response_text)
+                else:
+                    raise ValueError(f"Unexpected response type: {type(response_text)}")
+                
                 if "thought" not in parsed_response:
                     raise ValueError("Invalid response format")
                 self._add_history(
                     history_type=f"Step {iter_num + 1}",
                     message="",
                 )
-                if "answer" in parsed_response:
+                if parsed_response["answer"] != None:
                     self._add_history(
                         history_type="answer",
                         message=parsed_response["answer"]

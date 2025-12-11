@@ -192,6 +192,7 @@ class BenchmarkRunner(metaclass=AutodocABCMeta):
 
         outputs = []
         used_agents = []
+        num_runs = 10
         for benchmark in self._benchmark_configs:
             agent: Executor = workflow.get_component(benchmark.agent)
             used_agents.append(agent)
@@ -204,78 +205,82 @@ class BenchmarkRunner(metaclass=AutodocABCMeta):
 
             task_results, task_trace_ids = {}, {}
             for idx, task_path in enumerate(benchmark.tasks):
-                async with AsyncExitStack():
-                    send_message(callbacks, message=CallbackMessage(
-                        source="benchmark_runner",
-                        type=MessageType.PROGRESS,
-                        data=f"Running task: {task_path} ({idx + 1}/{len(benchmark.tasks)})"
-                    ))
-                    send_message(callbacks, message=CallbackMessage(
-                        source="benchmark_runner",
-                        type=MessageType.LOG,
-                        data=f"Running task: {task_path}"
-                    ))
-                    self._logger.info("Running task: %s", task_path)
-                    if not os.path.exists(task_path):
-                        task_filepath = os.path.join(self._default_folder, task_path)
-                    else:
-                        task_filepath = task_path
+                for run_idx in range(num_runs):
+                    run_key = f"{task_path}::run{run_idx}"
+                    async with AsyncExitStack():
+                        send_message(callbacks, message=CallbackMessage(
+                            source="benchmark_runner",
+                            type=MessageType.PROGRESS,
+                            data=f"Running task: {task_path} ({idx + 1}/{len(benchmark.tasks)}) ({run_idx + 1}/{num_runs})"
+                        ))
+                        send_message(callbacks, message=CallbackMessage(
+                            source="benchmark_runner",
+                            type=MessageType.LOG,
+                            data=f"Running task: {task_path} ({run_idx + 1}/{num_runs})"
+                        ))
+                        self._logger.info("Running task: %s", task_path)
+                        if not os.path.exists(task_path):
+                            task_filepath = os.path.join(self._default_folder, task_path)
+                        else:
+                            task_filepath = task_path
 
-                    stored_result = store.load_task_result(
-                        benchmark=benchmark, task_config_path=task_filepath)
-                    if not overwrite and stored_result is not None:
-                        task_results[task_path] = stored_result["results"]
-                        task_trace_ids[task_path] = stored_result["trace_id"]
-                        self._logger.info("Loaded stored results for task: %s", task_path)
-                        continue
+                        stored_result = None
+                        if num_runs == 1:
+                            stored_result = store.load_task_result(
+                                benchmark=benchmark, task_config_path=task_filepath)
+                        if num_runs == 1 and not overwrite and stored_result is not None:
+                            task_results[task_path] = stored_result["results"]
+                            task_trace_ids[task_path] = stored_result["trace_id"]
+                            self._logger.info("Loaded stored results for task: %s", task_path)
+                            continue
 
-                    # Execute the task and the corresponding evaluations
-                    task = Task(task_filepath, context=self._context)
-                    if task.use_specified_server() and isinstance(agent, BaseAgent):
-                        await agent.change_servers(task.get_mcp_servers())
-                    agent.reset()
-                    tracer = Tracer(collector=trace_collector)
-                    question = task.get_question()
-                    output_format = task.get_output_format()
+                        # Execute the task and the corresponding evaluations
+                        task = Task(task_filepath, context=self._context)
+                        if task.use_specified_server() and isinstance(agent, BaseAgent):
+                            await agent.change_servers(task.get_mcp_servers())
+                        agent.reset()
+                        tracer = Tracer(collector=trace_collector)
+                        question = task.get_question()
+                        output_format = task.get_output_format()
 
-                    await send_message_async(callbacks, message=CallbackMessage(
-                        source=__file__,
-                        type=MessageType.LOG,
-                        metadata={"event": "task_description", "data": task}
-                    ))
-                    try:
-                        response = await agent.execute(
-                            question,
-                            output_format=output_format,
-                            tracer=tracer,
-                            callbacks=callbacks
+                        await send_message_async(callbacks, message=CallbackMessage(
+                            source=__file__,
+                            type=MessageType.LOG,
+                            metadata={"event": "task_description", "data": task}
+                        ))
+                        try:
+                            response = await agent.execute(
+                                question,
+                                output_format=output_format,
+                                tracer=tracer,
+                                callbacks=callbacks
+                            )
+                            result = response.get_response_str()
+                        except Exception as e:
+                            result = str(e)
+                        evaluation_results = await task.evaluate(result)
+
+                        # Save the evaluation results
+                        task_results[run_key] = {
+                            "evaluation_results": evaluation_results
+                        }
+                        task_trace_ids[run_key] = tracer.trace_id
+                        trace_records = trace_collector.get(tracer.trace_id)
+                        store.dump_task_result(
+                            benchmark=benchmark,
+                            task_config_path=task_filepath,
+                            evaluation_results=evaluation_results,
+                            trace_id=tracer.trace_id,
+                            overwrite=True
                         )
-                        result = response.get_response_str()
-                    except Exception as e:
-                        result = str(e)
-                    evaluation_results = await task.evaluate(result)
 
-                    # Save the evaluation results
-                    task_results[task_path] = {
-                        "evaluation_results": evaluation_results
-                    }
-                    task_trace_ids[task_path] = tracer.trace_id
-                    trace_records = trace_collector.get(tracer.trace_id)
-                    store.dump_task_result(
-                        benchmark=benchmark,
-                        task_config_path=task_filepath,
-                        evaluation_results=evaluation_results,
-                        trace_id=tracer.trace_id,
-                        overwrite=True
-                    )
-
-                    # Reset task status/environment
-                    self._logger.info("Resetting task %s", task_path)
-                    await task.reset(trace_records)
-                    await task.cleanup()
-                    self._logger.info("Finished resetting task %s", task_path)
-                    if task.use_specified_server() and isinstance(agent, BaseAgent):
-                        await agent.cleanup()
+                        # Reset task status/environment
+                        self._logger.info("Resetting task %s", task_path)
+                        await task.reset(trace_records)
+                        await task.cleanup()
+                        self._logger.info("Finished resetting task %s", task_path)
+                        if task.use_specified_server() and isinstance(agent, BaseAgent):
+                            await agent.cleanup()
 
             outputs.append(BenchmarkResult(
                 benchmark=benchmark, task_results=task_results, task_trace_ids=task_trace_ids))
