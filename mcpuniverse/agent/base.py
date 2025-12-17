@@ -423,6 +423,24 @@ class BaseAgent(Executor, ExportConfigMixin, metaclass=ComponentABCMeta):
                     tool_call = llm_response
 
                 if "server" in tool_call and "tool" in tool_call and "arguments" in tool_call:
+                    args = tool_call["arguments"]
+                    if isinstance(args, dict):
+                        normalized_args = {}
+                        for k, v in args.items():
+                            if isinstance(v, str):
+                                s = v.strip()
+                                # Try to parse JSON-like strings into real objects
+                                if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+                                    try:
+                                        normalized_args[k] = json.loads(s)
+                                    except json.JSONDecodeError:
+                                        normalized_args[k] = v  # leave as-is if parsing fails
+                                else:
+                                    normalized_args[k] = v
+                            else:
+                                normalized_args[k] = v
+                    tool_call["arguments"] = normalized_args
+                    print(f"[DEBUG base.py] line443 {tool_call}")
                     if tool_call["server"] not in self._tools:
                         raise RuntimeError(f"Not found server {tool_call['server']}")
                     for tool in self._tools[tool_call["server"]]:
