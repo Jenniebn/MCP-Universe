@@ -27,11 +27,11 @@ spec:
   description: Test agent for google maps tasks. 
   agent: qwen-funct-call
   tasks:
-    - test/location_navigation/google_maps_task_0001.json
-    - test/location_navigation/google_maps_task_0002.json
-    - test/location_navigation/google_maps_task_0003.json
-    - test/location_navigation/google_maps_task_0004.json
-    - test/location_navigation/google_maps_task_0005.json
+    # - test/location_navigation/google_maps_task_0001.json
+    # - test/location_navigation/google_maps_task_0002.json
+    # - test/location_navigation/google_maps_task_0003.json
+    # - test/location_navigation/google_maps_task_0004.json
+    # - test/location_navigation/google_maps_task_0005.json
     # - test/location_navigation/google_maps_task_0006.json
     # - test/location_navigation/google_maps_task_0007.json
     # - test/location_navigation/google_maps_task_0008.json
@@ -62,11 +62,11 @@ spec:
     # - test/location_navigation/google_maps_task_0033.json
     # - test/location_navigation/google_maps_task_0034.json
     # - test/location_navigation/google_maps_task_0035.json
-    # - test/multi_server/multi-server_task_weather_google_map_0001.json
-    # - test/multi_server/multi-server_task_weather_google_map_0002.json
-    # - test/multi_server/multi-server_task_weather_google_map_0003.json
-    # - test/multi_server/multi-server_task_weather_google_map_0004.json
-    # - test/multi_server/multi-server_task_weather_google_map_0005.json
+    - test/multi_server/multi-server_task_weather_google_map_0001.json
+    - test/multi_server/multi-server_task_weather_google_map_0002.json
+    - test/multi_server/multi-server_task_weather_google_map_0003.json
+    - test/multi_server/multi-server_task_weather_google_map_0004.json
+    - test/multi_server/multi-server_task_weather_google_map_0005.json
     # - test/multi_server/multi-server_task_google_search_notion_0001.json
     # - test/multi_server/multi-server_task_google_search_notion_0002.json
     # - test/multi_server/multi-server_task_google_search_notion_0003.json

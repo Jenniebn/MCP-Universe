@@ -10,7 +10,7 @@ class TestBenchmarkRunner(unittest.IsolatedAsyncioTestCase):
 
     @pytest.mark.skip
     async def test(self):
-        trace_collector = FileCollector(log_file="log/tool_execution.log")
+        trace_collector = FileCollector(log_file="log/tool_execution_qwen_notion.log")
         benchmark = BenchmarkRunner("test/tool_execution.yaml")
         benchmark_results = await benchmark.run(
             trace_collector=trace_collector, 
@@ -19,7 +19,7 @@ class TestBenchmarkRunner(unittest.IsolatedAsyncioTestCase):
         report = BenchmarkReport(benchmark, trace_collector=trace_collector)
         report.dump()
 
-        report.export_metrics_stats_rollouts(prefix="mcpuni")
+        report.export_metrics_stats_rollouts(prefix="mcpuni-qwen-notion")
 
         print('=' * 66)
         print('Evaluation Result')

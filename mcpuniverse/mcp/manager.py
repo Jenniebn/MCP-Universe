@@ -211,7 +211,7 @@ class MCPManager(metaclass=AutodocABCMeta):
 
         client = MCPClient(name=f"{server_name}_client", permissions=permissions)
         if transport == "stdio":
-            await client.connect_to_stdio_server(server_config, timeout=timeout)
+            await client.connect_to_stdio_server(server_config, timeout=120)
         else:
             if mcp_gateway_address:
                 gateway_address = mcp_gateway_address
